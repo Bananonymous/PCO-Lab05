@@ -21,7 +21,7 @@ void test(int nbThreads, int size, int seed) {
 // Test cases for Quicksort
 TEST(SortingTest, EmptyArray) {
     Quicksort<int> sorter(2);
-    std::vector<int> array; // Empty array
+    std::vector<int> array(0); // Empty array
     sorter.sort(array);
     EXPECT_TRUE(array.empty());
 }
@@ -44,6 +44,10 @@ TEST(SortingTest, IdenticalElements) {
 
 TEST(SortingTest, SmallArray) {
     test(2, 10, 1); // Small array with 10 elements
+}
+
+TEST(SortingTest, MediumArray) {
+    test(2, 50, 1); // Small array with 10 elements
 }
 
 TEST(SortingTest, LargeArraySingleThread) {

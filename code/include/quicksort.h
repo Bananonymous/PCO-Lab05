@@ -4,134 +4,116 @@
 #include <vector>
 #include <atomic>
 #include <thread>
-#include <queue>
 #include <iostream> // For debug messages
-#include <pcosynchro/pcomutex.h>
-#include <pcosynchro/pcoconditionvariable.h>
+#include <queue>
 #include <pcosynchro/pcosemaphore.h>
 #include <pcosynchro/pcothread.h>
+#include <pcosynchro/pcomutex.h>
+#include <pcosynchro/pcoconditionvariable.h>
 
-/**
- * @brief The Task struct represents a subarray to sort.
- */
+#include "utils.h"
+
 struct Task {
     int lo;
     int hi;
 };
 
-/**
- * @brief The Buffer class implements the task queue with synchronization.
- */
-class Buffer {
-private:
-    PcoMutex mutex;                      // Mutex to protect buffer access
-    PcoConditionVariable isFree;         // Condition: space available
-    PcoConditionVariable isFull;         // Condition: data available
-    std::queue<Task> taskQueue;          // Queue to hold tasks
-    size_t maxSize = 10;                 // Default buffer size
-
-public:
-    Buffer() = default;
-
-    void put(Task task) {
-        mutex.lock(); // Lock the mutex explicitly
-        while (taskQueue.size() == maxSize) {
-            // Wait while the buffer is full, releasing and relocking the mutex
-            std::cout << "[Buffer] Waiting: Buffer full\n";
-            isFree.wait(&mutex);
-        }
-        taskQueue.push(task);
-        std::cout << "[Buffer] Added task: " << task.lo << ", " << task.hi << "\n";
-        isFull.notifyOne(); // Notify that data is available
-        mutex.unlock();     // Unlock the mutex explicitly
-    }
-
-    Task get() {
-        mutex.lock(); // Lock the mutex explicitly
-        while (taskQueue.empty()) {
-            // Wait while the buffer is empty, releasing and relocking the mutex
-            std::cout << "[Buffer] Waiting: Buffer empty\n";
-            isFull.wait(&mutex);
-        }
-        Task task = taskQueue.front();
-        taskQueue.pop();
-        std::cout << "[Buffer] Retrieved task: " << task.lo << ", " << task.hi << "\n";
-        isFree.notifyOne(); // Notify that space is available
-        mutex.unlock();     // Unlock the mutex explicitly
-        return task;
-    }
-
-    bool empty() {
-        mutex.lock();
-        const bool isEmpty = taskQueue.empty();
-        mutex.unlock();
-        return isEmpty;
-    }
-};
-
-/**
- * @brief The Quicksort class implements a multithreaded Quicksort algorithm.
- */
 template<typename T>
 class Quicksort {
 private:
-    std::vector<T>* array;
-    Buffer buffer;
+    std::vector<T> *array;
     std::atomic<int> activeTasks{0};
     std::vector<PcoThread> threadPool;
+    std::queue<Task> tasks;
     PcoSemaphore isDone;
-    bool stopThreads = false;
+    PcoMutex taskMutex;
+    PcoConditionVariable taskCondition;
 
 public:
-    explicit Quicksort(unsigned int nbThreads):isDone(0) {
+    Quicksort(unsigned int nbThreads) : isDone(0) {
         for (unsigned int i = 0; i < nbThreads; ++i) {
             threadPool.emplace_back(&Quicksort::workerThread, this);
         }
     }
 
-    void sort(std::vector<T>& array) {
+    void sort(std::vector<T> &array) {
         this->array = &array;
-        // Check if the buffer is empty, if so, return
-        if (array.size() <= 1) {
-            waitForCompletion();
+        if (array.size() <= 1 || isSorted(array)) {
+            signalCompletion();
             return;
+        } {
+            taskMutex.lock();
+            activeTasks = 1;  // Initialize to 1 for the initial task
+            tasks.push({0, static_cast<int>(array.size() - 1)});
+            taskMutex.unlock();
+            taskCondition.notifyOne();
         }
-        // Add the initial task (entire array)
-        activeTasks++;
-        buffer.put({0, (array.size() - 1)});
 
-        // Wait for all tasks to complete
         waitForCompletion();
     }
 
 private:
     void workerThread() {
-        while (true) {
-            if (stopThreads) return;
+        try {
+            while (true) {
+                Task task;
+                taskMutex.lock();
+                while (tasks.empty() && !PcoThread::thisThread()->stopRequested()) {
+                    taskCondition.wait(&taskMutex);
+                }
 
-            Task task = buffer.get();
+                if (tasks.empty() && PcoThread::thisThread()->stopRequested()) {
+                    taskMutex.unlock();
+                    return;
+                }
 
-            quicksort(task.lo, task.hi);
+                if (!tasks.empty()) {
+                    task = tasks.front();
+                    tasks.pop();
+                } else {
+                    taskMutex.unlock();
+                    continue;
+                }
+                taskMutex.unlock();
 
-            if (--activeTasks == 0) {
-                isDone.release();
+                if (task.lo == -1 && task.hi == -1) {
+                    return;
+                }
+
+                quicksort(task.lo, task.hi);
+
+                if (activeTasks.fetch_sub(1) == 1) {
+                    // This was the last active task
+                    isDone.release();
+                }
+
             }
+        } catch (const std::exception &e) {
+            std::cerr << "[WorkerThread] Exception caught: " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "[WorkerThread] Unknown exception caught\n";
         }
     }
 
     void quicksort(int lo, int hi) {
-        if (lo >= hi) return;
+        if (lo >= hi || lo < 0 || hi >= array->size()) return;
 
         int pivotIndex = partition(lo, hi);
 
-        // Add new tasks for left and right partitions only if they are valid
-        if (lo < pivotIndex - 1) {
-            activeTasks++;
-            buffer.put({lo, pivotIndex - 1});
+        if (lo < pivotIndex) {
+            activeTasks.fetch_add(1);
+            taskMutex.lock();
+            tasks.push({lo, pivotIndex - 1});
+            taskMutex.unlock();
+            taskCondition.notifyOne();
         }
-        if (pivotIndex + 1 < hi) {
-            activeTasks++;
-            buffer.put({pivotIndex + 1, hi});
+
+        if (pivotIndex + 1 <= hi) {
+            activeTasks.fetch_add(1);
+            taskMutex.lock();
+            tasks.push({pivotIndex + 1, hi});
+            taskMutex.unlock();
+            taskCondition.notifyOne();
         }
     }
 
@@ -150,20 +132,26 @@ private:
     }
 
     void waitForCompletion() {
-        std::cout << "[Quicksort] All tasks completed, stopping threads\n";
-        stopThreads = true;
+        isDone.acquire();
+        signalCompletion();
+    }
 
-        // Request all threads to stop
-        for (auto& thread : threadPool) {
+    void signalCompletion() {
+        for (auto &thread : threadPool) {
             thread.requestStop();
         }
 
-        // Join all threads safely
-        for (auto& thread : threadPool) {
-                thread.join();
+        taskMutex.lock();
+        for (unsigned int i = 0; i < threadPool.size(); ++i) {
+            tasks.push({-1, -1});
+        }
+        taskMutex.unlock();
+        taskCondition.notifyAll();
+
+        for (auto &thread : threadPool) {
+            thread.join();
         }
     }
-
 };
 
 #endif // QUICKSORT_H
