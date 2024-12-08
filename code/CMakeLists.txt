@@ -14,7 +14,7 @@ set(HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/quicksort.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/utils.h
 )
-
+#set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 add_executable(PCO_LAB05_tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/main.cpp ${HEADERS})
 add_executable(PCO_LAB05_benchmarks ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/main.cpp ${HEADERS})
 

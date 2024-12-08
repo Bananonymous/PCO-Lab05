@@ -23,7 +23,7 @@ class Quicksort {
 private:
     std::vector<T> *array;
     std::atomic<int> activeTasks{0};
-    std::vector<PcoThread> threadPool;
+    std::vector<std::unique_ptr<PcoThread> > threadPool;
     std::queue<Task> tasks;
     PcoSemaphore isDone;
     PcoMutex taskMutex;
@@ -32,7 +32,7 @@ private:
 public:
     Quicksort(unsigned int nbThreads) : isDone(0) {
         for (unsigned int i = 0; i < nbThreads; ++i) {
-            threadPool.emplace_back(&Quicksort::workerThread, this);
+            threadPool.emplace_back(std::make_unique<PcoThread>(&Quicksort::workerThread, this));
         }
     }
 
@@ -43,7 +43,7 @@ public:
             return;
         } {
             taskMutex.lock();
-            activeTasks = 1;  // Initialize to 1 for the initial task
+            activeTasks = 1; // Initialize to 1 for the initial task
             tasks.push({0, static_cast<int>(array.size() - 1)});
             taskMutex.unlock();
             taskCondition.notifyOne();
@@ -62,18 +62,14 @@ private:
                     taskCondition.wait(&taskMutex);
                 }
 
-                if (tasks.empty() && PcoThread::thisThread()->stopRequested()) {
+                if (PcoThread::thisThread()->stopRequested()) {
                     taskMutex.unlock();
+                    taskCondition.notifyOne();
                     return;
                 }
 
-                if (!tasks.empty()) {
-                    task = tasks.front();
-                    tasks.pop();
-                } else {
-                    taskMutex.unlock();
-                    continue;
-                }
+                task = tasks.front();
+                tasks.pop();
                 taskMutex.unlock();
 
                 if (task.lo == -1 && task.hi == -1) {
@@ -86,7 +82,6 @@ private:
                     // This was the last active task
                     isDone.release();
                 }
-
             }
         } catch (const std::exception &e) {
             std::cerr << "[WorkerThread] Exception caught: " << e.what() << "\n";
@@ -101,7 +96,7 @@ private:
         int pivotIndex = partition(lo, hi);
 
         if (lo < pivotIndex) {
-            activeTasks.fetch_add(1);
+            ++activeTasks;
             taskMutex.lock();
             tasks.push({lo, pivotIndex - 1});
             taskMutex.unlock();
@@ -109,7 +104,7 @@ private:
         }
 
         if (pivotIndex + 1 <= hi) {
-            activeTasks.fetch_add(1);
+            ++activeTasks;
             taskMutex.lock();
             tasks.push({pivotIndex + 1, hi});
             taskMutex.unlock();
@@ -137,8 +132,8 @@ private:
     }
 
     void signalCompletion() {
-        for (auto &thread : threadPool) {
-            thread.requestStop();
+        for (auto &thread: threadPool) {
+            thread->requestStop();
         }
 
         taskMutex.lock();
@@ -146,10 +141,10 @@ private:
             tasks.push({-1, -1});
         }
         taskMutex.unlock();
-        taskCondition.notifyAll();
+        taskCondition.notifyOne();
 
-        for (auto &thread : threadPool) {
-            thread.join();
+        for (auto &thread: threadPool) {
+            thread->join();
         }
     }
 };
